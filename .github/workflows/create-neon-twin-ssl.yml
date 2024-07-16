@@ -1,0 +1,32 @@
+name: Create Neon Twin (SSL)
+
+on:
+  # schedule:
+  # - cron: '0 0 * * *' # Runs at midnight ET (us-east-1)
+  workflow_dispatch:
+
+env:
+  PROD_DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }} # Production or primary database
+  DEV_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }} # Development database
+  SSL_CERT_BASE64: ${{ secrets.SSL_CERT_BASE64 }}
+  PG_VERSION: '16'
+
+jobs:
+  dump-and-restore:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Decode SSL Cert
+        run: |
+          echo "${{ secrets.SSL_CERT_BASE64 }}" | base64 --decode > us-east-1-bundle.pem
+
+      - name: Install PostgreSQL
+        run: |
+          sudo apt update
+          yes '' | sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
+          sudo apt install -y postgresql-${{ env.PG_VERSION }}
+
+      - name: Dump from RDS and Restore to Neon
+        run: |
+          /usr/lib/postgresql/${{ env.PG_VERSION }}/bin/pg_dump "${{ env.PROD_DATABASE_URL }}" -Fc -f "${{ github.workspace }}/prod-dump-file.dump"
+          /usr/lib/postgresql/${{ env.PG_VERSION }}/bin/pg_restore --clean --no-owner --no-acl --if-exists -d "${{ env.DEV_DATABASE_URL }}" "${{ github.workspace }}/prod-dump-file.dump"

@@ -1,0 +1,123 @@
+name: Create Neon Twin (Slack)
+
+on:
+  # schedule:
+  # - cron: '0 0 * * *' # Runs at midnight ET (us-east-1)
+  workflow_dispatch:
+
+env:
+  PROD_DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }} # Production or primary database
+  DEV_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }} # Development database
+  PG_VERSION: '16'
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+  NODE_VERSION: '20.x'
+
+jobs:
+  capture-start-time:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Capture start time
+        id: capture-start-time
+        run: |
+          echo "start_time=$(date --utc +"%Y-%m-%dT%H:%M:%SZ")" >> $GITHUB_OUTPUT
+
+    outputs:
+      start_time: ${{ steps.capture-start-time.outputs.start_time }}
+
+  dump-and-restore:
+    runs-on: ubuntu-latest
+    needs:
+      - 'capture-start-time'
+
+    steps:
+      - name: Install PostgreSQL
+        run: |
+          sudo apt update
+          yes '' | sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
+          sudo apt install -y postgresql-${{ env.PG_VERSION }}
+
+      - name: Dump from RDS and Restore to Neon
+        run: |
+          /usr/lib/postgresql/${{ env.PG_VERSION }}/bin/pg_dump "${{ env.PROD_DATABASE_URL }}" -Fc -f "${{ github.workspace }}/prod-dump-file.dump"
+          /usr/lib/postgresql/${{ env.PG_VERSION }}/bin/pg_restore --clean --no-owner --no-acl --if-exists -d "${{ env.DEV_DATABASE_URL }}" "${{ github.workspace }}/prod-dump-file.dump"
+
+  db-query:
+    runs-on: ubuntu-latest
+    needs:
+      - dump-and-restore
+
+    steps:
+      - name: Install PostgreSQL
+        run: |
+          sudo apt update
+          yes '' | sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
+          sudo apt install -y postgresql-${{ env.PG_VERSION }}
+
+      - name: Database Query
+        id: db-query
+        run: |
+          echo "database_size=$(/usr/lib/postgresql/${{ env.PG_VERSION }}/bin/psql "${{ env.PROD_DATABASE_URL }}" -t -c "SELECT pg_database_size(current_database());")" >> $GITHUB_OUTPUT
+
+          echo "database_name=$(/usr/lib/postgresql/${{ env.PG_VERSION }}/bin/psql "${{ env.PROD_DATABASE_URL }}" -t -c "SELECT current_database();")" >> $GITHUB_OUTPUT
+
+    outputs:
+      database_size: ${{ steps.db-query.outputs.database_size }}
+      database_name: ${{ steps.db-query.outputs.database_name }}
+
+  capture-end-time:
+    runs-on: ubuntu-latest
+    needs:
+      - db-query
+
+    steps:
+      - name: Capture end time
+        id: capture-end-time
+        run: |
+          echo "end_time=$(date --utc +"%Y-%m-%dT%H:%M:%SZ")" >> $GITHUB_OUTPUT
+
+    outputs:
+      end_time: ${{ steps.capture-end-time.outputs.end_time }}
+
+  post-to-slack-success:
+    runs-on: ubuntu-latest
+    needs:
+      - capture-start-time
+      - db-query
+      - capture-end-time
+    if: ${{ success() }}
+
+    env:
+      DATABASE_SIZE: ${{ needs.db-query.outputs.database_size }}
+      DATABASE_NAME: ${{ needs.db-query.outputs.database_name }}
+      JOB_START_TIME: ${{ needs.capture-start-time.outputs.start_time }}
+      JOB_END_TIME: ${{ needs.capture-end-time.outputs.end_time }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Success script
+        run: |
+          node src/slack-success.js
+
+  post-to-slack-failure:
+    runs-on: ubuntu-latest
+    needs:
+      - dump-and-restore
+      - db-query
+    if: ${{ failure() }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Failure script
+        run: |
+          node src/slack-failure.js
