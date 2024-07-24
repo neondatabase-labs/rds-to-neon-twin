@@ -108,7 +108,6 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - dump-and-restore
-      - db-query
     if: ${{ failure() }}
 
     steps:
